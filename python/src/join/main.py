@@ -22,15 +22,32 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.aggregators = {}
+        self.fruit_tops = {}
 
-    def process_messsage(self, message, ack, nack):
+    def process_message(self, message, ack, nack):
         logging.info("Received top")
-        fruit_top = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
+        client_id, partial_top = message_protocol.internal.deserialize(message)
+
+        self.aggregators[client_id] = self.aggregators.get(client_id, 0) + 1
+        client_items = self.fruit_tops.setdefault(client_id, [])
+        client_items.extend(
+            fruit_item.FruitItem(fruit, amount) for fruit, amount in partial_top
+        )  
+
+        if self.aggregators[client_id] < AGGREGATION_AMOUNT:
+            ack()
+            return
+        
+        fruit_chunk = sorted(self.fruit_tops.pop(client_id))[-TOP_SIZE:]
+        fruit_chunk.reverse()
+        self.aggregators.pop(client_id)
+        fruit_top = [(item.fruit, item.amount) for item in fruit_chunk]
+        self.output_queue.send(message_protocol.internal.serialize([client_id, fruit_top]))
         ack()
 
     def start(self):
-        self.input_queue.start_consuming(self.process_messsage)
+        self.input_queue.start_consuming(self.process_message)
 
 
 def main():

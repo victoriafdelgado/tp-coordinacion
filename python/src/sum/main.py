@@ -55,13 +55,16 @@ class SumFilter:
         with self.lock:
             client_totals = self.amount_by_fruit.pop(client_id, {})
 
+        target = self.data_output_exchanges[
+            int(client_id.replace("-", ""), 16) % AGGREGATION_AMOUNT
+        ]
+
         for final_fruit_item in client_totals.values():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [client_id, final_fruit_item.fruit, final_fruit_item.amount]
-                    )
+            target.send(
+                message_protocol.internal.serialize(
+                    [client_id, final_fruit_item.fruit, final_fruit_item.amount]
                 )
+            )
 
         logging.info(f"Broadcasting EOF message")
         for data_output_exchange in self.data_output_exchanges:

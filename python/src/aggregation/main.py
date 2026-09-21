@@ -54,7 +54,7 @@ class AggregationFilter:
         self.output_queue.send(message_protocol.internal.serialize([client_id,fruit_top]))
         self.clients_eof.pop(client_id)
 
-    def process_messsage(self, message, ack, nack):
+    def process_message(self, message, ack, nack):
         logging.info("Process message")
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
@@ -64,7 +64,7 @@ class AggregationFilter:
         ack()
 
     def start(self):
-        self.input_exchange.start_consuming(self.process_messsage)
+        self.input_exchange.start_consuming(self.process_message)
 
 
 def main():
