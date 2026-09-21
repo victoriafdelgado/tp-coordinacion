@@ -16,5 +16,5 @@ class MessageHandler:
     def deserialize_result_message(self, message):
         client_id, top = message_protocol.internal.deserialize(message)
         if client_id != self.client_id:
-                return None
+            return None
         return top

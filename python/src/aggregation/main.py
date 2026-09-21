@@ -24,10 +24,12 @@ class AggregationFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
         self.fruit_top = {}
+        self.clients_eof = {}
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
         fruit_top = self.fruit_top.setdefault(client_id, [])
+       
         for i in range(len(fruit_top)):
             if fruit_top[i].fruit == fruit:
                 fruit_top[i] = fruit_top[i] + fruit_item.FruitItem(
@@ -38,6 +40,9 @@ class AggregationFilter:
 
     def _process_eof(self, client_id):
         logging.info("Received EOF")
+        self.clients_eof[client_id] = self.clients_eof.get(client_id, 0) + 1
+        if self.clients_eof[client_id] < SUM_AMOUNT:
+            return
         fruit_chunk = sorted(self.fruit_top.pop(client_id, []))[-TOP_SIZE:]
         fruit_chunk.reverse()
         fruit_top = list(
@@ -47,7 +52,7 @@ class AggregationFilter:
             )
         )
         self.output_queue.send(message_protocol.internal.serialize([client_id,fruit_top]))
-        self.fruit_top = {} 
+        self.clients_eof.pop(client_id)
 
     def process_messsage(self, message, ack, nack):
         logging.info("Process message")
