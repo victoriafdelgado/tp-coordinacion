@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -25,6 +26,25 @@ class JoinFilter:
         self.aggregators = {}
         self.fruit_tops = {}
 
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
+
+    def _handle_sigterm(self, signum, frame):
+        logging.info("Handling SIGTERM")
+        try:
+            self.input_queue.stop_consuming()
+        except Exception as e:
+            logging.error(f"Error al detener input_queue: {e}")
+
+    def _close(self):
+        try:
+            self.input_queue.close()
+        except Exception as e:
+            logging.error(f"Error al cerrar 'input_queue': {e}")
+        try:
+            self.output_queue.close()
+        except Exception as e:
+            logging.error(f"Error al cerrar 'output_queue': {e}")     
+
     def process_message(self, message, ack, nack):
         logging.info("Received top")
         client_id, partial_top = message_protocol.internal.deserialize(message)
@@ -47,16 +67,19 @@ class JoinFilter:
         ack()
 
     def start(self):
-        self.input_queue.start_consuming(self.process_message)
-
+        try:
+            self.input_queue.start_consuming(self.process_message)
+        except Exception as e:
+            logging.error(f"Error al empezar a consumir con 'input_queue': {e}")
+            raise e
+        finally:
+            self._close()
 
 def main():
     logging.basicConfig(level=logging.INFO)
     join_filter = JoinFilter()
     join_filter.start()
-
     return 0
-
 
 if __name__ == "__main__":
     main()

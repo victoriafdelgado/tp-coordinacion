@@ -1,6 +1,7 @@
 import os
 import logging
 import bisect
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -25,6 +26,24 @@ class AggregationFilter:
         )
         self.fruit_top = {}
         self.clients_eof = {}
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
+
+    def _handle_sigterm(self, signum, frame):
+        logging.info("Handling SIGTERM")
+        try:
+            self.input_exchange.stop_consuming()
+        except Exception as e:
+            logging.error(f"Error al detener input_exchange: {e}")
+
+    def _close(self):
+            try:
+                self.input_exchange.close()
+            except Exception as e:
+                logging.error(f"Error al cerrar 'exchange_queue': {e}")
+            try:
+                self.output_queue.close()
+            except Exception as e:
+                logging.error(f"Error al cerrar 'output_queue': {e}")     
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
@@ -64,8 +83,12 @@ class AggregationFilter:
         ack()
 
     def start(self):
-        self.input_exchange.start_consuming(self.process_message)
-
+        try:
+            self.input_exchange.start_consuming(self.process_message)
+        except Exception as e:
+            logging.error(f"Error al empezar a consumir en 'input_exchange': {e}")        
+        finally: 
+            self._close()
 
 def main():
     logging.basicConfig(level=logging.INFO)

@@ -1,6 +1,8 @@
 import os
 import logging
 import threading
+import signal
+import hashlib
 
 from common import middleware, message_protocol, fruit_item
 
@@ -35,6 +37,24 @@ class SumFilter:
         self.lock = threading.Lock()
         self.amount_by_fruit = {}
 
+        self.control_receiver = None
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
+
+    def _handle_sigterm(self, signum, frame):
+        logging.info("Handling SIGTERM")
+        self.input_queue.stop_consuming()
+        self.control_receiver.stop_consuming()
+
+    def _close(self):
+        try:
+            self.input_queue.close()
+        except Exception as e:
+            logging.error(f"Error al cerrar 'input_queue': {e}")
+        try:
+            self.control_receiver.close()
+        except Exception as e:
+            logging.error(f"Error al cerrar 'control_receiver': {e}")     
+
     def _control_loop(self):
         control_receiver = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [CONTROL_KEY]
@@ -55,11 +75,10 @@ class SumFilter:
         with self.lock:
             client_totals = self.amount_by_fruit.pop(client_id, {})
 
-        target = self.data_output_exchanges[
-            int(client_id.replace("-", ""), 16) % AGGREGATION_AMOUNT
-        ]
-
         for final_fruit_item in client_totals.values():
+            target = self.data_output_exchanges[
+                int(hashlib.md5(final_fruit_item.fruit.encode()).hexdigest(), 16) % AGGREGATION_AMOUNT
+            ]
             target.send(
                 message_protocol.internal.serialize(
                     [client_id, final_fruit_item.fruit, final_fruit_item.amount]
@@ -89,8 +108,14 @@ class SumFilter:
     def start(self):
         control_thread = threading.Thread(target=self._control_loop, daemon=True)
         control_thread.start()
-        self.input_queue.start_consuming(self.process_data_messsage)
-
+        try:
+            self.input_queue.start_consuming(self.process_data_messsage)
+            control_thread.join()
+        except Exception as e:
+            logging.error(f"Error al empezar a consumir con 'input_queue': {e}")
+        finally:
+            self._close()
+        
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
