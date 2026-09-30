@@ -23,8 +23,12 @@ class SumFilter:
             MOM_HOST, INPUT_QUEUE
         )
 
-        self.control_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, SUM_CONTROL_EXCHANGE, [CONTROL_KEY]
+        self.control_exchange_consumer = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [f"{SUM_CONTROL_EXCHANGE}_{ID}"]
+        )
+
+        self.control_exchange_publisher = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [f"{SUM_CONTROL_EXCHANGE}_{i}" for i in range(SUM_AMOUNT)]
         )
 
         self.data_output_exchanges = []
@@ -35,31 +39,34 @@ class SumFilter:
             self.data_output_exchanges.append(data_output_exchange)
 
         self.lock = threading.Lock()
-        self.amount_by_fruit = {}
+        self.amount_by_fruit = {}    
+        self.msg_count = {}       
+        self.eof_total = {}     
+        self.total = {}     
 
-        self.control_receiver = None
+        self.closing = False
+        self.control_thread = threading.Thread(target=self._control_exchange_loop, daemon=True)
         signal.signal(signal.SIGTERM, self._handle_sigterm)
 
     def _handle_sigterm(self, signum, frame):
         logging.info("Handling SIGTERM")
+        self.closing = True
         self.input_queue.stop_consuming()
-        self.control_receiver.stop_consuming()
-
+       
     def _close(self):
         try:
             self.input_queue.close()
         except Exception as e:
             logging.error(f"Error al cerrar 'input_queue': {e}")
         try:
-            self.control_receiver.close()
+            self.control_exchange_publisher.close()
         except Exception as e:
-            logging.error(f"Error al cerrar 'control_receiver': {e}")     
+            logging.error(f"Error al cerrar 'control_exchange_publisher': {e}")     
+        try:
+            self.control_exchange_consumer.close()
+        except Exception as e:
+            logging.error(f"Error al cerrar 'control_exchange_consumer': {e}")     
 
-    def _control_loop(self):
-        control_receiver = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, SUM_CONTROL_EXCHANGE, [CONTROL_KEY]
-        )
-        control_receiver.start_consuming(self.process_control_message)
 
     def _process_data(self, client_id, fruit, amount):
         logging.info(f"Process data")
@@ -69,11 +76,36 @@ class SumFilter:
                 fruit, fruit_item.FruitItem(fruit, 0)
             ) + fruit_item.FruitItem(fruit, int(amount))
 
-    def _process_eof(self, client_id):
-        logging.info(f"Broadcasting data messages")
+            self.msg_count[client_id] = self.msg_count.get(client_id, 0 )+1
 
+            if client_id in self.eof_total:
+                self.control_exchange_publisher.send(message_protocol.internal.serialize([client_id, ID, self.msg_count[client_id], None]))
+
+    def _process_eof(self, client_id, total):
         with self.lock:
-            client_totals = self.amount_by_fruit.pop(client_id, {})
+            self.control_exchange_publisher.send(message_protocol.internal.serialize(
+            [client_id, ID, self.msg_count.get(client_id, 0 ), total])
+            )
+
+    def process_control_message(self, message, ack, nack):
+        client_id, sender_id, msg_count, msg_total = message_protocol.internal.deserialize(message)
+        with self.lock:
+            if msg_total is not None and client_id not in self.eof_total:
+                self.eof_total[client_id] = msg_total
+                self.control_exchange_publisher.send(message_protocol.internal.serialize([client_id, ID, self.msg_count.get(client_id,0), None]))
+
+            total = self.total.setdefault(client_id, {})
+            total[sender_id] = max(total.get(sender_id, 0), msg_count)
+
+            expected = self.eof_total.get(client_id)
+            if expected is not None and sum(total.values()) == expected:
+                self._flush(client_id)
+        ack()
+
+    def _flush(self, client_id):
+        client_totals = self.amount_by_fruit.pop(client_id, {})
+        for state in (self.msg_count, self.eof_total, self.total):
+            state.pop(client_id, None)
 
         for final_fruit_item in client_totals.values():
             target = self.data_output_exchanges[
@@ -85,32 +117,25 @@ class SumFilter:
                 )
             )
 
-        logging.info(f"Broadcasting EOF message")
         for data_output_exchange in self.data_output_exchanges:
             data_output_exchange.send(message_protocol.internal.serialize([client_id]))
-        
-    def _process_control_exch(self, client_id):
-        self.control_exchange.send(message_protocol.internal.serialize([client_id])) 
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             self._process_data(*fields)
         else:
-            self._process_control_exch(*fields)
+            self._process_eof(*fields)
         ack()
 
-    def process_control_message(self, message, ack, nack):
-        fields = message_protocol.internal.deserialize(message)
-        self._process_eof(*fields)
-        ack()
+    def _control_exchange_loop(self):
+        self.control_exchange_consumer.start_consuming(self.process_control_message)
 
     def start(self):
-        control_thread = threading.Thread(target=self._control_loop, daemon=True)
-        control_thread.start()
+        self.control_thread.start()
         try:
             self.input_queue.start_consuming(self.process_data_messsage)
-            control_thread.join()
+            self.control_thread.join()
         except Exception as e:
             logging.error(f"Error al empezar a consumir con 'input_queue': {e}")
         finally:

@@ -23,7 +23,7 @@ class _MessageMiddlewareRabbitMQ():
             raise MessageMiddlewareMessageError()
         try:
             callback = self._define_callback(on_message_callback)
-            self.channel.basic_qos(prefetch_count=1)
+            self.channel.basic_qos()
             self.channel.basic_consume(queue=queue_name,
                                         on_message_callback=callback)
             self._is_consuming = True
