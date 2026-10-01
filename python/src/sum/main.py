@@ -44,15 +44,13 @@ class SumFilter:
         self.eof_total = {}     
         self.total = {}     
 
-        self.closing = False
-        self.control_thread = threading.Thread(target=self._control_exchange_loop, daemon=True)
+        self.control_thread = threading.Thread(target=self._control_exchange_loop)
         signal.signal(signal.SIGTERM, self._handle_sigterm)
 
     def _handle_sigterm(self, signum, frame):
         logging.info("Handling SIGTERM")
-        self.closing = True
         self.input_queue.stop_consuming()
-       
+
     def _close(self):
         try:
             self.input_queue.close()
@@ -62,11 +60,9 @@ class SumFilter:
             self.control_exchange_publisher.close()
         except Exception as e:
             logging.error(f"Error al cerrar 'control_exchange_publisher': {e}")     
-        try:
-            self.control_exchange_consumer.close()
-        except Exception as e:
-            logging.error(f"Error al cerrar 'control_exchange_consumer': {e}")     
-
+ 
+    def _broadcast(self, client_id, total=None):
+        self.control_exchange_publisher.send(message_protocol.internal.serialize([client_id, ID, self.msg_count.get(client_id, 0), total]))
 
     def _process_data(self, client_id, fruit, amount):
         logging.info(f"Process data")
@@ -79,20 +75,18 @@ class SumFilter:
             self.msg_count[client_id] = self.msg_count.get(client_id, 0 )+1
 
             if client_id in self.eof_total:
-                self.control_exchange_publisher.send(message_protocol.internal.serialize([client_id, ID, self.msg_count[client_id], None]))
+                self._broadcast(client_id)
 
     def _process_eof(self, client_id, total):
         with self.lock:
-            self.control_exchange_publisher.send(message_protocol.internal.serialize(
-            [client_id, ID, self.msg_count.get(client_id, 0 ), total])
-            )
+            self._broadcast(client_id, total)
 
     def process_control_message(self, message, ack, nack):
         client_id, sender_id, msg_count, msg_total = message_protocol.internal.deserialize(message)
         with self.lock:
             if msg_total is not None and client_id not in self.eof_total:
                 self.eof_total[client_id] = msg_total
-                self.control_exchange_publisher.send(message_protocol.internal.serialize([client_id, ID, self.msg_count.get(client_id,0), None]))
+                self._broadcast(client_id)
 
             total = self.total.setdefault(client_id, {})
             total[sender_id] = max(total.get(sender_id, 0), msg_count)
@@ -129,16 +123,35 @@ class SumFilter:
         ack()
 
     def _control_exchange_loop(self):
-        self.control_exchange_consumer.start_consuming(self.process_control_message)
+        try:
+            self.control_exchange_consumer.start_consuming(self.process_control_message)
+        finally:
+            self._close_control()
+
+    def _close_control(self):
+        try:
+            self.control_exchange_consumer.close()
+        except Exception as e:
+            logging.error(f"Error al cerrar 'control_exchange_consumer': {e}")
+        for i, exchange in enumerate(self.data_output_exchanges):
+            try:
+                exchange.close()
+            except Exception as e:
+                logging.error(f"Error al cerrar 'data_output_exchange_{i}': {e}")
 
     def start(self):
         self.control_thread.start()
         try:
             self.input_queue.start_consuming(self.process_data_messsage)
-            self.control_thread.join()
         except Exception as e:
             logging.error(f"Error al empezar a consumir con 'input_queue': {e}")
         finally:
+            while self.control_thread.is_alive():
+                try: 
+                    self.control_exchange_consumer.stop_consuming_threadsafe()
+                except Exception as e:
+                    logging.error(f"Error al detener 'control_exchange_consumer': {e}")
+                self.control_thread.join()
             self._close()
         
 def main():

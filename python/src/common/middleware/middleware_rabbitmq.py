@@ -23,7 +23,7 @@ class _MessageMiddlewareRabbitMQ():
             raise MessageMiddlewareMessageError()
         try:
             callback = self._define_callback(on_message_callback)
-            self.channel.basic_qos()
+            self.channel.basic_qos(prefetch_count=1)
             self.channel.basic_consume(queue=queue_name,
                                         on_message_callback=callback)
             self._is_consuming = True
@@ -43,6 +43,16 @@ class _MessageMiddlewareRabbitMQ():
         except pika.exceptions.AMQPConnectionError as e:
             raise MessageMiddlewareDisconnectedError(e)
 
+    def _stop_consuming_threadsafe(self):
+        if not self._is_consuming:
+            return
+        try:
+            self.connection.add_callback_threadsafe(self.channel.stop_consuming)
+        except pika.exceptions.AMQPConnectionError as e:
+            raise MessageMiddlewareDisconnectedError(e)
+        except pika.exceptions.AMQPError as e:
+            raise MessageMiddlewareMessageError(e)
+        
     def _close(self):
         try:
             self.connection.close()
@@ -69,6 +79,9 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
     
     def stop_consuming(self):
         self._messagemwrabbit._stop_consuming()
+
+    def stop_consuming_threadsafe(self):
+       self._messagemwrabbit._stop_consuming_threadsafe()
 
     def send(self, message):
         try:
@@ -121,6 +134,9 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
 
     def stop_consuming(self):
         self._messagemwrabbit._stop_consuming()
+
+    def stop_consuming_threadsafe(self):
+           self._messagemwrabbit._stop_consuming_threadsafe()
 
     def send(self, message):
         try:
